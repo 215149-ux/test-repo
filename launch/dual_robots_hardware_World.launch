@@ -1,0 +1,76 @@
+<?xml version="1.0" ?>
+<launch>
+
+  <!-- ========================= -->
+  <!-- 1. IP ADDRESSES -->
+  <!-- ========================= -->
+  <arg name="robot_ip_1" default="172.16.1.2" />
+  <arg name="robot_ip_2" default="172.16.1.3" />
+
+  <!-- ========================= -->
+  <!-- 2. WORLD FRAME (GLOBAL TF) -->
+  <!-- ========================= -->
+
+  <!-- Panda1 in world -->
+  <node pkg="tf2_ros" type="static_transform_publisher"
+        name="world_to_panda1"
+        output="screen"
+        args="0 0 0 0 0 0 world panda1_link0" />
+
+  <!-- Panda2 in world (offset on chessboard) -->
+  <node pkg="tf2_ros" type="static_transform_publisher"
+        name="world_to_panda2"
+        output="screen"
+        args="1.05 0 0 3.14159 0 0 world panda2_link0" />
+
+
+  <!-- ========================= -->
+  <!-- 3. ROBOT 1 (PANDA1) -->
+  <!-- ========================= -->
+  <group ns="panda1">
+
+    <include file="$(find franka_control)/launch/franka_control.launch">
+      <arg name="robot_ip" value="$(arg robot_ip_1)" />
+      <arg name="arm_id" value="panda1" />
+      <arg name="load_gripper" value="true" />
+    </include>
+
+    <node name="controller_spawner"
+          pkg="controller_manager"
+          type="spawner"
+          output="screen"
+          args="effort_joint_trajectory_controller" />
+
+    <include file="$(find panda_moveit_config)/launch/move_group.launch">
+      <arg name="arm_id" value="panda1" />
+      <arg name="load_robot_description" value="false" />
+    </include>
+
+  </group>
+
+
+  <!-- ========================= -->
+  <!-- 4. ROBOT 2 (PANDA2) -->
+  <!-- ========================= -->
+  <group ns="panda2">
+
+    <include file="$(find franka_control)/launch/franka_control.launch">
+      <arg name="robot_ip" value="$(arg robot_ip_2)" />
+      <arg name="arm_id" value="panda2" />
+      <arg name="load_gripper" value="true" />
+    </include>
+
+    <node name="controller_spawner"
+          pkg="controller_manager"
+          type="spawner"
+          output="screen"
+          args="effort_joint_trajectory_controller" />
+
+    <include file="$(find panda_moveit_config)/launch/move_group.launch">
+      <arg name="arm_id" value="panda2" />
+      <arg name="load_robot_description" value="false" />
+    </include>
+
+  </group>
+
+</launch>

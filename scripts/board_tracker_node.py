@@ -375,6 +375,10 @@ class BoardTrackerNode:
         self._shutdown = threading.Event()
         self._move_log = []        # قائمة الـ UCI moves المنشورة
         self._pending_event = threading.Event()  # لإيقاظ حلقة المسح فوراً بعد أمر
+        # يُطلق بعد كل حركة ناجحة اكتشفها scan_loop — نستخدمه عشان
+        # _simulate_player_move ينتظر الاكتشاف قبل ما يرجع، فما يسبق المستخدم
+        # حلقةَ المسح ويطلب الـ moves قبل ما تتسجّل الحركة.
+        self._move_detected_event = threading.Event()
 
         # ROS setup
         if ROS_AVAILABLE:
@@ -515,6 +519,9 @@ class BoardTrackerNode:
 
         # عرض اللوحة الجديدة
         print_chess_board(self.chess_board)
+
+        # أيقظ أي متصل ينتظر اكتشاف الحركة (مثل _simulate_player_move)
+        self._move_detected_event.set()
 
         # تنبيهات نهاية اللعبة
         if self.chess_board.is_checkmate():
@@ -696,6 +703,10 @@ Commands:
         is_ep = self.chess_board.is_en_passant(mv)
         is_castling = self.chess_board.is_castling(mv)
 
+        # صفّر العلم قبل تطبيق أي تغيير فيزيائي — هكذا ننتظر
+        # اكتشاف *هذه* الحركة بالذات، مو حركة سابقة.
+        self._move_detected_event.clear()
+
         if is_ep:
             # en-passant: البيدق المأكول على نفس ملف الهدف، لكن على رتبة from.
             captured_sq = to_sq[0] + from_sq[1]
@@ -720,7 +731,17 @@ Commands:
         else:
             # حركة عادية
             self.sensor.apply_changes({from_sq: 0, to_sq: 1})
-        # scan loop يكتشف ويصنف وينشر في الدورة التالية
+
+        # ننتظر حتى تكتشف حلقة المسح الحركة وتحدّث اللوحة الذهنية.
+        # هذا يمنع المستخدم من كتابة 'moves' قبل ما تتسجّل الحركة.
+        # في النود الحقيقية على الراسبيري، هذا الانتظار طبيعي (المستخدم
+        # يحرّك قطعة فعلية فياخد وقت)، لكن في المحاكاة لازم نحاكيه يدوياً.
+        stabilization_time = scan_period * (self.STABILITY_CYCLES + 1)
+        self._pending_event.set()  # أيقظ حلقة المسح فوراً
+        if not self._move_detected_event.wait(timeout=stabilization_time + 0.5):
+            # ما اكتُشفت حركة خلال المهلة — غالباً تصنيف غامض.
+            # نرجع بدون تحذير لأن حلقة المسح ستطبع تشخيصاً إن استلزم الأمر.
+            pass
 
     # -------- Run --------
     def run(self):

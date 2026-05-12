@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!--
+  board_tracker.launch
+  تشغيل نود تعقّب اللوحة بالمحاكاة.
+
+  التشغيل:
+    $ roslaunch chessrobot_project board_tracker.launch
+
+  ينشر على:
+    /chess/human_move       std_msgs/String  (UCI للحركة، مثلاً "e2e4")
+    /chess/board_occupancy  std_msgs/String  (JSON فيه occupancy و FEN)
+    /chess/detected_move    std_msgs/String  (JSON مفصّل عن الحركة)
+
+  يستمع على:
+    /chess/game_start       std_msgs/String  (إعادة تعيين اللوحة)
+
+  ملاحظة: النود تقبل إدخال الحركات من التيرمينال، لذا شغّلها في تيرمينال
+  مستقل باستخدام launch-prefix="xterm -e" أو ببساطة:
+    $ rosrun chessrobot_project board_tracker_node.py
+-->
+<launch>
+  <arg name="scan_rate_hz" default="20" />
+
+  <node pkg="chessrobot_project"
+        type="board_tracker_node.py"
+        name="board_tracker"
+        output="screen"
+        required="true"
+        launch-prefix="xterm -e">
+    <param name="scan_rate_hz" value="$(arg scan_rate_hz)" />
+  </node>
+</launch>

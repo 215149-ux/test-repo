@@ -603,7 +603,8 @@ class BoardTrackerNode:
 
     def _dispatch_stable(self, current_occ):
         if self.mode == Mode.WAITING:
-            self._monitor_mismatch_check(current_occ)
+            # لا game_start بعد — inert تماماً. لا تصنيف ولا تنبيهات.
+            # اللاعب قد يكون يجهّز اللوحة أو يجرّب الحساسات.
             return
         if self.mode == Mode.LOCKED:
             return  # لا تصنيف، ننتظر board_state

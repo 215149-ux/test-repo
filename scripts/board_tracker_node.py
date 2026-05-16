@@ -506,7 +506,10 @@ class BoardTrackerNode:
             self.mode = Mode.WAITING
             return
         if self.game_mode == 'RvR':
-            self.mode = Mode.MONITOR
+            # Robot vs Robot: لا يوجد لاعب بشري يحرّك على اللوحة الفيزيائية.
+            # الذراعان هما من يحرّكان القطع. لا حاجة لتعقّب الحساسات أبداً.
+            # نبقى WAITING (inert كلياً) — لا تصنيف ولا mismatch ولا نشر.
+            self.mode = Mode.WAITING
             return
         # HvR
         if self.locked_uci is not None or self.pending_promotion_from_to is not None:

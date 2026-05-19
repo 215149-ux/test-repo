@@ -53,12 +53,9 @@ CLOSE_WIDTH   = 0.025
 GRIPPER_SPEED = 0.1
 
 # =====================================================================
-# --- موقع الـREADY (الروبوت يبدأ ويرجع لهون) ---
+# --- اسم وضعية الـREADY المعرّفة بالـSRDF ---
 # =====================================================================
-READY_X   = 0.40
-READY_Y   = 0.00
-READY_Z   = 0.30
-READY_YAW = 0.0
+READY_POSE_NAME = "ready"
 
 
 # =====================================================================
@@ -191,11 +188,12 @@ def move_to_pose(move_group, x, y, z, vf, af, yaw=0.0):
     move_group.clear_pose_targets()
 
 def move_to_ready(move_group):
-    """يحرك الروبوت لموقع الـREADY الآمن."""
-    rospy.loginfo(f"[READY] Moving to ready position: "
-                  f"({READY_X}, {READY_Y}, {READY_Z})")
-    move_to_pose(move_group, READY_X, READY_Y, READY_Z,
-                 V_SLOW, A_SLOW, yaw=READY_YAW)
+    """يحرك الروبوت لوضعية الـready المعرّفة بالـSRDF (joint-space)."""
+    rospy.loginfo(f"[READY] Moving to named pose: '{READY_POSE_NAME}'")
+    move_group.set_named_target(READY_POSE_NAME)
+    move_group.go(wait=True)
+    move_group.stop()
+    move_group.clear_pose_targets()
 
 def gripper_full_close(move_client, speed=None):
     """

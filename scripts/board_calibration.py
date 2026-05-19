@@ -99,8 +99,9 @@ PROBE_INITIAL_SETTLE_S = 0.5   # ثواني نتجاهل فيها أي trigger �
 # =====================================================================
 USE_WRIST_DEFLECTION_CORRECTION = False
 
-# --- ازاحة طرف القابض عن مركز TCP ---
-GRIPPER_TIP_OFFSET = (0.018 / 2) - 0.00
+# --- ازاحة طرف القابض عن مركز TCP (لكل محور على حدة) ---
+GRIPPER_TIP_OFFSET_S = (0.018 / 2) - 0.00   # أوفسيت الجنوب (S probes)
+GRIPPER_TIP_OFFSET_W = (0.018 / 2) - 0.00   # أوفسيت الغرب (W probes)
 
 # --- نقاط بدء الـprobing ---
 W1_START_XY = (0.50,  0.20)
@@ -536,7 +537,7 @@ class BoardCalibration:
         cur_loaded = get_current_pose_in_ref(move_group)
         yaw_loaded = _yaw_from_pose(cur_loaded)
         d_yaw_loaded = _wrap_angle(yaw_loaded - yaw_start)
-        tip_err_loaded_mm = abs(GRIPPER_TIP_OFFSET *
+        tip_err_loaded_mm = abs(GRIPPER_TIP_OFFSET_S *
                                 np.sin(d_yaw_loaded)) * 1000.0
         rospy.loginfo(f"  [probe][DIAG] yaw_loaded   (contact) = "
                       f"{np.degrees(yaw_loaded):+.4f} deg")
@@ -549,7 +550,7 @@ class BoardCalibration:
         final = get_current_pose_in_ref(move_group)
         yaw_settled = _yaw_from_pose(final)
         d_yaw_settled = _wrap_angle(yaw_settled - yaw_start)
-        tip_err_settled_mm = abs(GRIPPER_TIP_OFFSET *
+        tip_err_settled_mm = abs(GRIPPER_TIP_OFFSET_S *
                                  np.sin(d_yaw_settled)) * 1000.0
         rospy.loginfo(f"  [probe][DIAG] yaw_settled            = "
                       f"{np.degrees(yaw_settled):+.4f} deg")
@@ -754,21 +755,28 @@ class BoardCalibration:
         eh_avg = eh_avg / np.linalg.norm(eh_avg)
         eN_fix = np.array([-eh_avg[1], eh_avg[0]])
 
-        # --- تصحيح نقاط التلامس بازاحة نصف عرض الجريبر ---
+        # --- تصحيح نقاط التلامس بازاحة نصف عرض الجريبر (لكل محور أوفسيت خاص) ---
+        # probes_p2 ترتيب: S1, S2, W1, W2
+        # S probes تستخدم GRIPPER_TIP_OFFSET_S، W probes تستخدم GRIPPER_TIP_OFFSET_W
+        tip_offsets = [GRIPPER_TIP_OFFSET_S, GRIPPER_TIP_OFFSET_S,
+                       GRIPPER_TIP_OFFSET_W, GRIPPER_TIP_OFFSET_W]
+
         if use_deflection_corr:
-            rospy.loginfo(f"Applying gripper tip offset = "
-                          f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts "
+            rospy.loginfo(f"Applying gripper tip offsets: "
+                          f"S={GRIPPER_TIP_OFFSET_S*1000:.1f}mm, "
+                          f"W={GRIPPER_TIP_OFFSET_W*1000:.1f}mm "
                           f"(WITH wrist-deflection correction)")
             offset_dirs = [_rot_2d(d, dy)
                            for d, dy in zip(probe_dirs, delta_yaws)]
         else:
-            rospy.loginfo(f"Applying gripper tip offset = "
-                          f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts "
+            rospy.loginfo(f"Applying gripper tip offsets: "
+                          f"S={GRIPPER_TIP_OFFSET_S*1000:.1f}mm, "
+                          f"W={GRIPPER_TIP_OFFSET_W*1000:.1f}mm "
                           f"(legacy: nominal direction)")
             offset_dirs = list(probe_dirs)
 
-        contacts_corr = [c + d * GRIPPER_TIP_OFFSET
-                         for c, d in zip(contacts, offset_dirs)]
+        contacts_corr = [c + d * off
+                         for c, d, off in zip(contacts, offset_dirs, tip_offsets)]
         S1, S2, W1, W2 = contacts_corr
         for (name, *_rest), c_raw, c_cor, d_yaw in zip(
                 probes_p2, contacts, contacts_corr, delta_yaws):

@@ -7,34 +7,20 @@ board_tracker_v2.py — Physical Board Tracker (Raspberry Pi)
 ROS Topics:
   Publishers:
     /chess/move               → UCI string (حركة كاملة)
-    /chess/promotion_request  → JSON {move: 'e7e8'} (حركة ترقية بدون حرف القطعة)
+    /chess/promotion_request  → JSON {move: 'e7e8'}
 
   Subscribers:
-    /chess/game_start    ← JSON settings (لبدء التتبع)
-    /chess/board_state   ← JSON {board, fen, ...} (لتزامن الحالة بعد حركة الروبوت)
-    /chess/turn_signal   ← JSON {active, turn, human_color, mode, fen} (لمعرفة متى يتتبع)
-    /chess/game_stop     ← 'stop' (لإيقاف التتبع)
-    /chess/pause         ← 'pause'/'resume' (لإيقاف مؤقت)
-
-Communication Flow (HvR):
-  1. chess_engine ينشر turn_signal {active: true} → board_tracker يبدأ يتتبع
-  2. الإنسان يحرّك قطعة → board_tracker يكتشف → ينشر /chess/move
-  3. chess_engine يعالج الحركة → ينشر board_state + turn_signal {active: false}
-  4. الروبوت يلعب → chess_engine ينشر board_state → board_tracker يتزامن
-  5. chess_engine ينشر turn_signal {active: true} → يرجع لخطوة 2
-
-Communication Flow (Promotion):
-  1. board_tracker يكتشف بيدق وصل rank 1/8 → ينشر /chess/promotion_request
-  2. chess_engine يبعث __PROMOTION__ للـ display
-  3. display يعرض نافذة → المستخدم يختار → ينشر /chess/move (مع حرف الترقية)
+    /chess/game_start    ← JSON settings
+    /chess/board_state   ← JSON {board, fen, ...}
+    /chess/turn_signal   ← JSON {active, turn, human_color, mode, fen}
+    /chess/game_stop     ← 'stop'
+    /chess/pause         ← 'pause'/'resume'
 """
 
 import time
-import os
 import sys
 import json
 import threading
-import copy
 
 try:
     import RPi.GPIO as GPIO
@@ -61,10 +47,6 @@ FILES = 'abcdefgh'
 RANKS = '12345678'
 
 
-def sq_to_rc(sq):
-    return 8 - int(sq[1]), FILES.index(sq[0])
-
-
 def rc_to_sq(row, col):
     return FILES[col] + str(8 - row)
 
@@ -89,6 +71,26 @@ def diff_occupancy(prev, curr):
             elif prev[r][c] == 0 and curr[r][c] == 1:
                 appeared.append(rc_to_sq(r, c))
     return disappeared, appeared
+
+
+def print_matrix(occ, label=""):
+    """يطبع مصفوفة 8x8 بشكل واضح"""
+    print(f"\n{'═'*30} {label} {'═'*30}")
+    print("     a  b  c  d  e  f  g  h")
+    print("   ┌" + "───" * 8 + "┐")
+    for r in range(8):
+        rank_num = 8 - r
+        row_str = f" {rank_num} │"
+        for c in range(8):
+            if occ[r][c] == 1:
+                row_str += " ■ "
+            else:
+                row_str += " · "
+        row_str += f"│ {rank_num}"
+        print(row_str)
+    print("   └" + "───" * 8 + "┘")
+    print("     a  b  c  d  e  f  g  h")
+    print(f"{'═'*66}\n")
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -231,28 +233,29 @@ class Mode:
 class BoardTrackerRPi:
     SCAN_RATE_HZ = 20
     STABILITY_CYCLES = 3
-    LOCKED_TIMEOUT_S = 10.0      # تقليل: لو board_state ما وصل خلال 10 ثوان → unlock
-    LIFT_TIMEOUT_S = 30.0
+    LOCKED_TIMEOUT_S = 10.0
     MISMATCH_GRACE_S = 3.0
+    PRINT_INTERVAL_S = 2.0       # طباعة المصفوفة كل ثانيتين عند التغيير
 
     def __init__(self):
         self.chess_board = chess.Board()
         self.sensor = GPIOSensorBoard()
         self.mode = Mode.WAITING
-        self.game_mode = None          # 'HvR' or 'RvR'
+        self.game_mode = None
         self.human_color = None
-        self.game_active = False       # هل اللعبة شغّالة
-        self.paused = False            # هل اللعبة متوقفة مؤقتاً
-        self.tracker_active = False    # هل دور الإنسان (يجب التتبع)
+        self.game_active = False
+        self.paused = False
+        self.tracker_active = False
         self.last_board_state_time = 0.0
         self.locked_uci = None
         self.locked_time = 0.0
         self.pending_since = None
-        self.last_pending_repr = None
         self.last_anomaly_repr = None
         self.last_mismatch_repr = None
         self.pending_promotion_from_to = None
         self._anchor_occ = occupancy_from_chess(self.chess_board)
+        self._last_printed_occ = None
+        self._last_print_time = 0.0
         self._shutdown = threading.Event()
         self._move_log = []
 
@@ -262,12 +265,12 @@ class BoardTrackerRPi:
             self.pub_move = rospy.Publisher('/chess/move', String, queue_size=10)
             self.pub_promo = rospy.Publisher('/chess/promotion_request', String, queue_size=10)
 
-            # Subscribers
-            rospy.Subscriber('/chess/game_start', String, self._on_game_start)
-            rospy.Subscriber('/chess/board_state', String, self._on_board_state)
-            rospy.Subscriber('/chess/turn_signal', String, self._on_turn_signal)
-            rospy.Subscriber('/chess/game_stop', String, self._on_game_stop)
-            rospy.Subscriber('/chess/pause', String, self._on_pause)
+            # Subscribers — queue_size=1 لضمان أحدث رسالة
+            rospy.Subscriber('/chess/game_start', String, self._on_game_start, queue_size=5)
+            rospy.Subscriber('/chess/board_state', String, self._on_board_state, queue_size=5)
+            rospy.Subscriber('/chess/turn_signal', String, self._on_turn_signal, queue_size=5)
+            rospy.Subscriber('/chess/game_stop', String, self._on_game_stop, queue_size=5)
+            rospy.Subscriber('/chess/pause', String, self._on_pause, queue_size=5)
 
             self._log = rospy.loginfo
             self._warn = rospy.logwarn
@@ -277,32 +280,43 @@ class BoardTrackerRPi:
             self._log = lambda m: print("[INFO] " + m)
             self._warn = lambda m: print("[WARN] " + m)
 
-    # ─── Publishers ────────────────────────────────────────────────
+    # ─── Helpers ───────────────────────────────────────────────────
     def _pub(self, pub, msg):
         if pub:
             pub.publish(msg)
         else:
-            print("[PUB] " + str(msg)[:200])
+            print(f"[PUB] {str(msg)[:200]}")
+
+    def _print(self, msg):
+        """طباعة مباشرة + rospy.loginfo"""
+        print(msg)
+        sys.stdout.flush()
+        if ROS_AVAILABLE and not rospy.is_shutdown():
+            rospy.loginfo(msg)
 
     # ─── ROS Callbacks ─────────────────────────────────────────────
     def _on_game_start(self, msg):
-        """بداية لعبة جديدة — reset كل شيء"""
+        self._print(f"\n{'*'*50}")
+        self._print(f"📥 [RECEIVED] /chess/game_start: {msg.data[:100]}")
+        self._print(f"{'*'*50}")
         try:
             p = json.loads(msg.data)
         except Exception:
+            self._print("❌ JSON parse error!")
             return
+
         mode = p.get('mode', '')
         if 'Robot vs Robot' in mode:
             self.game_mode = 'RvR'
             self.human_color = None
-            self.tracker_active = False  # في RvR لا نتتبع
+            self.tracker_active = False
         elif 'Human vs Robot' in mode:
             self.game_mode = 'HvR'
             color = p.get('color', 'white').strip().lower()
             self.human_color = chess.WHITE if color == 'white' else chess.BLACK
-            # لو الإنسان أبيض — بنبدأ بالتتبع فوراً
             self.tracker_active = (color == 'white')
         else:
+            self._print(f"⚠️  Unknown mode: '{mode}'")
             return
 
         self.chess_board = chess.Board()
@@ -313,54 +327,48 @@ class BoardTrackerRPi:
         self.game_active = True
         self.paused = False
         self._update_mode()
-        self._log(f"game_start: mode={self.game_mode} human_color={color} tracker={self.mode}")
+
+        self._print(f"✅ Game started! mode={self.game_mode} tracker_active={self.tracker_active} → mode={self.mode}")
+        print_matrix(self._anchor_occ, "INITIAL ANCHOR")
 
     def _on_board_state(self, msg):
-        """
-        استقبال حالة اللوحة من chess_engine.
-        يُستخدم لتزامن الـ chess_board و anchor_occ بعد حركة الروبوت.
-        هذا التحديث يفك الـ LOCKED state أيضاً.
-        """
+        self._print(f"📥 [RECEIVED] /chess/board_state (len={len(msg.data)})")
         try:
             p = json.loads(msg.data)
         except Exception:
+            self._print("❌ JSON parse error on board_state!")
             return
 
-        # نستخدم FEN للتزامن الدقيق
         fen = p.get('fen')
         if fen:
             try:
                 self.chess_board = chess.Board(fen)
                 self._anchor_occ = occupancy_from_chess(self.chess_board)
                 self.last_board_state_time = time.time()
-                # ── فك الـ LOCKED — board_state يعني chess_engine عالج الحركة ──
                 self.locked_uci = None
                 self.pending_promotion_from_to = None
                 self.pending_since = None
-                self._log(f"board_state synced via FEN: {fen.split()[0][:20]}...")
+                self._print(f"✅ board_state synced: {fen.split()[0][:30]}... turn={'W' if self.chess_board.turn else 'B'}")
+                print_matrix(self._anchor_occ, "SYNCED ANCHOR")
             except Exception as e:
-                self._warn(f"FEN parse error: {e}")
+                self._print(f"❌ FEN parse error: {e}")
                 return
         else:
-            # Fallback: لو ما في fen (توافق مع chess_node القديم)
-            self._warn("board_state without FEN — cannot sync precisely!")
+            self._print("⚠️  board_state without FEN — no sync!")
 
         self._update_mode()
+        self._print(f"   → mode={self.mode}")
 
     def _on_turn_signal(self, msg):
-        """
-        إشارة الدور من chess_engine.
-        active=true يعني: دور الإنسان، ابدأ بالتتبع.
-        active=false يعني: دور الروبوت، لا تتتبع.
-        """
+        self._print(f"📥 [RECEIVED] /chess/turn_signal: {msg.data[:80]}")
         try:
             p = json.loads(msg.data)
         except Exception:
+            self._print("❌ JSON parse error on turn_signal!")
             return
 
         self.tracker_active = p.get('active', False)
 
-        # تزامن إضافي لو في fen — يضمن الـ anchor محدّث قبل ما نبدأ نتتبع
         fen = p.get('fen')
         if fen:
             try:
@@ -368,37 +376,37 @@ class BoardTrackerRPi:
                 if new_board.fen() != self.chess_board.fen():
                     self.chess_board = new_board
                     self._anchor_occ = occupancy_from_chess(self.chess_board)
-                    self._log(f"turn_signal: anchor updated from FEN")
+                    self._print(f"   anchor updated from turn_signal FEN")
+                    print_matrix(self._anchor_occ, "UPDATED ANCHOR")
             except Exception:
                 pass
 
-        # لو active=True — تأكد إنّ الـ LOCKED محرّر
         if self.tracker_active:
             self.locked_uci = None
             self.pending_promotion_from_to = None
             self.pending_since = None
 
         self._update_mode()
-        self._log(f"turn_signal: active={self.tracker_active} mode={self.mode}")
+        self._print(f"   → tracker_active={self.tracker_active} mode={self.mode}")
 
     def _on_game_stop(self, msg):
-        """إيقاف اللعبة"""
+        self._print(f"📥 [RECEIVED] /chess/game_stop: {msg.data}")
         if msg.data == "stop":
             self.game_active = False
             self.tracker_active = False
             self.paused = False
             self.mode = Mode.WAITING
-            self._log("Game stopped — tracker WAITING.")
+            self._print("🛑 Game stopped — tracker WAITING.")
 
     def _on_pause(self, msg):
-        """إيقاف مؤقت / استئناف"""
+        self._print(f"📥 [RECEIVED] /chess/pause: {msg.data}")
         if msg.data == "pause":
             self.paused = True
-            self._log("Game paused — tracker paused.")
+            self._print("⏸  Game paused.")
         elif msg.data == "resume":
             self.paused = False
             self._update_mode()
-            self._log("Game resumed — tracker resumed.")
+            self._print(f"▶  Game resumed → mode={self.mode}")
 
     # ─── Mode Management ──────────────────────────────────────────
     def _update_mode(self):
@@ -407,7 +415,7 @@ class BoardTrackerRPi:
         elif self.paused:
             self.mode = Mode.WAITING
         elif self.game_mode == 'RvR':
-            self.mode = Mode.WAITING    # في RvR لا نتتبع
+            self.mode = Mode.WAITING
         elif self.locked_uci or self.pending_promotion_from_to:
             self.mode = Mode.LOCKED
         elif self.tracker_active:
@@ -417,23 +425,23 @@ class BoardTrackerRPi:
 
     # ─── Move Publishing ──────────────────────────────────────────
     def _publish_move(self, uci):
-        self._log(f"PUBLISH /chess/move: {uci}")
+        self._print(f"\n🎯 PUBLISH /chess/move: {uci}")
         self._pub(self.pub_move, uci)
         self._move_log.append(uci)
         self.locked_uci = uci
         self.locked_time = time.time()
-        # نحدّث اللوحة المحلية بعد الإرسال
         try:
             self.chess_board.push(chess.Move.from_uci(uci))
             self._anchor_occ = occupancy_from_chess(self.chess_board)
         except Exception:
             pass
-        self.tracker_active = False  # الدور انتقل للروبوت
+        self.tracker_active = False
         self._update_mode()
+        self._print(f"   → LOCKED. Waiting for board_state/turn_signal...")
 
     def _publish_promo(self, from_to):
         payload = json.dumps({'move': from_to})
-        self._log(f"PUBLISH /chess/promotion_request: {payload}")
+        self._print(f"\n♟  PUBLISH /chess/promotion_request: {payload}")
         self._pub(self.pub_promo, payload)
         self.pending_promotion_from_to = from_to
         self._update_mode()
@@ -456,12 +464,25 @@ class BoardTrackerRPi:
                 last_occ = current
 
             if stable == self.STABILITY_CYCLES:
+                # ── طباعة المصفوفة عند التغيير ──
+                now = time.time()
+                if current != self._last_printed_occ and (now - self._last_print_time) > self.PRINT_INTERVAL_S:
+                    self._last_printed_occ = [row[:] for row in current]
+                    self._last_print_time = now
+                    print_matrix(current, f"SENSOR SCAN [mode={self.mode}]")
+                    # أظهر الفرق مع الـ anchor
+                    if self.mode == Mode.ACTIVE:
+                        disappeared, appeared = diff_occupancy(self._anchor_occ, current)
+                        if disappeared or appeared:
+                            print(f"   ↑ disappeared={disappeared}  appeared={appeared}")
+                            sys.stdout.flush()
+
                 self._dispatch(current)
 
             # Locked timeout
             if self.mode == Mode.LOCKED and self.locked_uci:
                 if time.time() - self.locked_time > self.LOCKED_TIMEOUT_S:
-                    self._warn(f"LOCKED timeout for {self.locked_uci}")
+                    self._print(f"⏰ LOCKED timeout for {self.locked_uci} — unlocking.")
                     self.locked_uci = None
                     self._update_mode()
 
@@ -497,13 +518,13 @@ class BoardTrackerRPi:
         if kind == 'pending':
             if self.pending_since is None:
                 self.pending_since = time.time()
-                self._log(f"PENDING: {result.get('disappeared', [])}")
+                self._print(f"⏳ PENDING: {result.get('disappeared', [])}")
             return
         if kind == 'anomaly':
             r = (tuple(result.get('disappeared', [])), tuple(result.get('appeared', [])))
             if r != self.last_anomaly_repr:
                 self.last_anomaly_repr = r
-                self._warn(f"ANOMALY: {result}")
+                self._print(f"⚠️  ANOMALY: disappeared={result.get('disappeared')} appeared={result.get('appeared')} reason={result.get('reason')}")
 
     def _check_mismatch(self, occ):
         expected = occupancy_from_chess(self.chess_board)
@@ -516,31 +537,52 @@ class BoardTrackerRPi:
         r = (tuple(d), tuple(a))
         if r != self.last_mismatch_repr:
             self.last_mismatch_repr = r
-            self._warn(f"MISMATCH: missing={d} extra={a}")
+            self._print(f"⚠️  MISMATCH: missing={d} extra={a}")
 
     # ─── Initial Verification ─────────────────────────────────────
     def verify_initial(self):
-        self._log("Waiting for 32 pieces...")
+        """
+        تحقق من القطع — مع timeout 30 ثانية.
+        لو ما اكتملت → يطبع تحذير ويكمّل (ما يحجز النود).
+        """
+        self._print("🔍 Checking initial board state (30s timeout)...")
         expected = occupancy_from_chess(chess.Board())
-        warned = False
+        deadline = time.time() + 30.0
+
         while not self._shutdown.is_set():
             if ROS_AVAILABLE and rospy.is_shutdown():
                 return False
-            if self.sensor.scan() == expected:
-                self._log("OK - All 32 pieces in place!")
+            current = self.sensor.scan()
+            if current == expected:
+                self._print("✅ All 32 pieces in place!")
+                print_matrix(current, "INITIAL BOARD")
                 return True
-            if not warned:
-                self._warn("Board not ready. Place all pieces.")
-                warned = True
+            if time.time() > deadline:
+                # ── Timeout — اطبع الحالة وكمّل ──
+                self._print("⚠️  TIMEOUT: Board not fully set up. Continuing anyway...")
+                print_matrix(current, "CURRENT (incomplete)")
+                print_matrix(expected, "EXPECTED (32 pieces)")
+                return True  # نكمّل بدل ما نحجز
             time.sleep(0.5)
         return False
 
     # ─── Main Entry Point ─────────────────────────────────────────
     def run(self):
-        self._log("Board Tracker RPi v2 starting...")
+        self._print("╔══════════════════════════════════════════════╗")
+        self._print("║   Board Tracker RPi v2 — Starting...        ║")
+        self._print("╚══════════════════════════════════════════════╝")
+        self._print(f"ROS_AVAILABLE={ROS_AVAILABLE}")
+        self._print(f"HAS_GPIO={HAS_GPIO}")
+
         if not self.verify_initial():
             return
-        self._log("Scan loop running. Waiting for /chess/game_start...")
+
+        self._print(f"\n🚀 Scan loop running.")
+        self._print(f"📡 Subscribed to: /chess/game_start, /chess/board_state,")
+        self._print(f"   /chess/turn_signal, /chess/game_stop, /chess/pause")
+        self._print(f"📢 Publishing to: /chess/move, /chess/promotion_request")
+        self._print(f"⏳ Waiting for /chess/game_start...\n")
+
         t = threading.Thread(target=self.scan_loop, daemon=True)
         t.start()
         try:
@@ -555,7 +597,7 @@ class BoardTrackerRPi:
             self._shutdown.set()
             t.join(timeout=2)
             self.sensor.cleanup()
-            self._log("Shutdown complete.")
+            self._print("🔌 Shutdown complete.")
 
 
 if __name__ == '__main__':

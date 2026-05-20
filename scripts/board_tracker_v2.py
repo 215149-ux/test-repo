@@ -553,20 +553,19 @@ class BoardTrackerRPi:
 
         while not self._shutdown.is_set():
             if ROS_AVAILABLE and rospy.is_shutdown():
-                return False
+                return
             current = self.sensor.scan()
             if current == expected:
                 self._print("✅ All 32 pieces in place!")
                 print_matrix(current, "INITIAL BOARD")
-                return True
+                return
             if time.time() > deadline:
                 self._print("⚠️  TIMEOUT: Continuing without full board.")
                 pieces = sum(sum(row) for row in current)
                 self._print(f"   Detected {pieces}/32 pieces")
                 print_matrix(current, f"CURRENT ({pieces} pieces)")
-                return True
+                return
             time.sleep(0.5)
-        return False
 
     # ─── Main Entry Point ─────────────────────────────────────────
     def run(self):
@@ -574,12 +573,22 @@ class BoardTrackerRPi:
         self._print("║   Board Tracker v2 — BUTTON MODE (Press ENTER)      ║")
         self._print("╚══════════════════════════════════════════════════════╝")
         self._print(f"ROS={ROS_AVAILABLE} | GPIO={HAS_GPIO}")
+        if ROS_AVAILABLE:
+            self._print(f"ROS_MASTER_URI={rospy.get_param('/run_id', 'connected')}")
         self._print("")
 
-        if not self.verify_initial():
-            return
+        # ── شغّل threads أولاً حتى الـ callbacks تشتغل فوراً ──
+        btn_thread = threading.Thread(target=self._button_listener, daemon=True)
+        btn_thread.start()
 
-        self._print(f"\n📡 Subscribed: game_start, board_state, turn_signal, game_stop, pause")
+        logic_thread = threading.Thread(target=self._main_loop, daemon=True)
+        logic_thread.start()
+
+        # ── verify_initial يشتغل بالخلفية (ما يحجز) ──
+        verify_thread = threading.Thread(target=self.verify_initial, daemon=True)
+        verify_thread.start()
+
+        self._print(f"📡 Subscribed: game_start, board_state, turn_signal, game_stop, pause")
         self._print(f"📢 Publishing: /chess/move, /chess/promotion_request")
         self._print(f"")
         self._print(f"┌─────────────────────────────────────────────────┐")
@@ -594,14 +603,6 @@ class BoardTrackerRPi:
         self._print(f"")
         self._print(f"⏳ Waiting for /chess/game_start...\n")
 
-        # شغّل thread لقراءة الكيبورد (محاكاة Push Button)
-        btn_thread = threading.Thread(target=self._button_listener, daemon=True)
-        btn_thread.start()
-
-        # شغّل thread المنطق الرئيسي
-        logic_thread = threading.Thread(target=self._main_loop, daemon=True)
-        logic_thread.start()
-
         try:
             if ROS_AVAILABLE:
                 rospy.spin()
@@ -614,6 +615,7 @@ class BoardTrackerRPi:
             self._shutdown.set()
             btn_thread.join(timeout=2)
             logic_thread.join(timeout=2)
+            verify_thread.join(timeout=2)
             self.sensor.cleanup()
             self._print("🔌 Shutdown complete.")
 

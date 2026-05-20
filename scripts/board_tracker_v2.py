@@ -2,11 +2,17 @@
 """
 board_tracker_v2.py — Physical Board Tracker (Raspberry Pi)
 ═══════════════════════════════════════════════════════════════════
-يتتبع الحركات الفيزيائية على رقعة الشطرنج عبر مصفوفة Hall-effect sensors.
+يتتبع الحركات الفيزيائية على رقعة الشطرنج.
+
+آلية العمل:
+  - اللاعب يحرّك القطعة على الرقعة الفيزيائية
+  - لمّا يخلص يكبس ENTER (محاكاة Push Button)
+  - عندها النود يقرأ السينسورز ويقارن مع الحالة السابقة
+  - لو الحركة قانونية → ينشرها على /chess/move
 
 ROS Topics:
   Publishers:
-    /chess/move               → UCI string (حركة كاملة)
+    /chess/move               → UCI string
     /chess/promotion_request  → JSON {move: 'e7e8'}
 
   Subscribers:
@@ -21,6 +27,7 @@ import time
 import sys
 import json
 import threading
+import select
 
 try:
     import RPi.GPIO as GPIO
@@ -90,7 +97,8 @@ def print_matrix(occ, label=""):
         print(row_str)
     print("   └" + "───" * 8 + "┘")
     print("     a  b  c  d  e  f  g  h")
-    print(f"{'═'*66}\n")
+    print(f"{'═'*66}")
+    sys.stdout.flush()
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -231,11 +239,8 @@ class Mode:
 #  Main Board Tracker Node
 # ═════════════════════════════════════════════════════════════════
 class BoardTrackerRPi:
-    SCAN_RATE_HZ = 20
-    STABILITY_CYCLES = 3
     LOCKED_TIMEOUT_S = 10.0
     MISMATCH_GRACE_S = 3.0
-    PRINT_INTERVAL_S = 2.0       # طباعة المصفوفة كل ثانيتين عند التغيير
 
     def __init__(self):
         self.chess_board = chess.Board()
@@ -249,15 +254,11 @@ class BoardTrackerRPi:
         self.last_board_state_time = 0.0
         self.locked_uci = None
         self.locked_time = 0.0
-        self.pending_since = None
-        self.last_anomaly_repr = None
-        self.last_mismatch_repr = None
         self.pending_promotion_from_to = None
         self._anchor_occ = occupancy_from_chess(self.chess_board)
-        self._last_printed_occ = None
-        self._last_print_time = 0.0
         self._shutdown = threading.Event()
         self._move_log = []
+        self._button_pressed = threading.Event()  # محاكاة الـ Push Button
 
         if ROS_AVAILABLE:
             rospy.init_node('board_tracker', anonymous=False)
@@ -265,39 +266,29 @@ class BoardTrackerRPi:
             self.pub_move = rospy.Publisher('/chess/move', String, queue_size=10)
             self.pub_promo = rospy.Publisher('/chess/promotion_request', String, queue_size=10)
 
-            # Subscribers — queue_size=1 لضمان أحدث رسالة
+            # Subscribers
             rospy.Subscriber('/chess/game_start', String, self._on_game_start, queue_size=5)
             rospy.Subscriber('/chess/board_state', String, self._on_board_state, queue_size=5)
             rospy.Subscriber('/chess/turn_signal', String, self._on_turn_signal, queue_size=5)
             rospy.Subscriber('/chess/game_stop', String, self._on_game_stop, queue_size=5)
             rospy.Subscriber('/chess/pause', String, self._on_pause, queue_size=5)
-
-            self._log = rospy.loginfo
-            self._warn = rospy.logwarn
         else:
             self.pub_move = None
             self.pub_promo = None
-            self._log = lambda m: print("[INFO] " + m)
-            self._warn = lambda m: print("[WARN] " + m)
 
     # ─── Helpers ───────────────────────────────────────────────────
     def _pub(self, pub, msg):
         if pub:
             pub.publish(msg)
-        else:
-            print(f"[PUB] {str(msg)[:200]}")
 
     def _print(self, msg):
-        """طباعة مباشرة + rospy.loginfo"""
         print(msg)
         sys.stdout.flush()
-        if ROS_AVAILABLE and not rospy.is_shutdown():
-            rospy.loginfo(msg)
 
     # ─── ROS Callbacks ─────────────────────────────────────────────
     def _on_game_start(self, msg):
         self._print(f"\n{'*'*50}")
-        self._print(f"📥 [RECEIVED] /chess/game_start: {msg.data[:100]}")
+        self._print(f"📥 /chess/game_start: {msg.data[:100]}")
         self._print(f"{'*'*50}")
         try:
             p = json.loads(msg.data)
@@ -328,15 +319,14 @@ class BoardTrackerRPi:
         self.paused = False
         self._update_mode()
 
-        self._print(f"✅ Game started! mode={self.game_mode} tracker_active={self.tracker_active} → mode={self.mode}")
-        print_matrix(self._anchor_occ, "INITIAL ANCHOR")
+        self._print(f"✅ Game started! mode={self.game_mode} tracker_active={self.tracker_active} → {self.mode}")
+        print_matrix(self._anchor_occ, "ANCHOR (initial)")
 
     def _on_board_state(self, msg):
-        self._print(f"📥 [RECEIVED] /chess/board_state (len={len(msg.data)})")
+        self._print(f"📥 /chess/board_state received")
         try:
             p = json.loads(msg.data)
         except Exception:
-            self._print("❌ JSON parse error on board_state!")
             return
 
         fen = p.get('fen')
@@ -347,24 +337,19 @@ class BoardTrackerRPi:
                 self.last_board_state_time = time.time()
                 self.locked_uci = None
                 self.pending_promotion_from_to = None
-                self.pending_since = None
-                self._print(f"✅ board_state synced: {fen.split()[0][:30]}... turn={'W' if self.chess_board.turn else 'B'}")
-                print_matrix(self._anchor_occ, "SYNCED ANCHOR")
+                self._print(f"   ✅ synced FEN: turn={'W' if self.chess_board.turn else 'B'}")
+                print_matrix(self._anchor_occ, "ANCHOR (synced)")
             except Exception as e:
-                self._print(f"❌ FEN parse error: {e}")
+                self._print(f"   ❌ FEN error: {e}")
                 return
-        else:
-            self._print("⚠️  board_state without FEN — no sync!")
-
         self._update_mode()
         self._print(f"   → mode={self.mode}")
 
     def _on_turn_signal(self, msg):
-        self._print(f"📥 [RECEIVED] /chess/turn_signal: {msg.data[:80]}")
+        self._print(f"📥 /chess/turn_signal: {msg.data[:60]}")
         try:
             p = json.loads(msg.data)
         except Exception:
-            self._print("❌ JSON parse error on turn_signal!")
             return
 
         self.tracker_active = p.get('active', False)
@@ -376,37 +361,42 @@ class BoardTrackerRPi:
                 if new_board.fen() != self.chess_board.fen():
                     self.chess_board = new_board
                     self._anchor_occ = occupancy_from_chess(self.chess_board)
-                    self._print(f"   anchor updated from turn_signal FEN")
-                    print_matrix(self._anchor_occ, "UPDATED ANCHOR")
+                    self._print(f"   anchor updated from FEN")
+                    print_matrix(self._anchor_occ, "ANCHOR (updated)")
             except Exception:
                 pass
 
         if self.tracker_active:
             self.locked_uci = None
             self.pending_promotion_from_to = None
-            self.pending_since = None
 
         self._update_mode()
-        self._print(f"   → tracker_active={self.tracker_active} mode={self.mode}")
+        self._print(f"   → active={self.tracker_active} mode={self.mode}")
+
+        # لو صار ACTIVE — نبّه المستخدم يحرّك ويكبس
+        if self.mode == Mode.ACTIVE:
+            self._print(f"\n{'─'*50}")
+            self._print(f"👉 YOUR TURN! Move your piece then press [ENTER]")
+            self._print(f"{'─'*50}")
 
     def _on_game_stop(self, msg):
-        self._print(f"📥 [RECEIVED] /chess/game_stop: {msg.data}")
+        self._print(f"📥 /chess/game_stop: {msg.data}")
         if msg.data == "stop":
             self.game_active = False
             self.tracker_active = False
             self.paused = False
             self.mode = Mode.WAITING
-            self._print("🛑 Game stopped — tracker WAITING.")
+            self._print("🛑 Game stopped.")
 
     def _on_pause(self, msg):
-        self._print(f"📥 [RECEIVED] /chess/pause: {msg.data}")
+        self._print(f"📥 /chess/pause: {msg.data}")
         if msg.data == "pause":
             self.paused = True
-            self._print("⏸  Game paused.")
+            self._print("⏸  Paused.")
         elif msg.data == "resume":
             self.paused = False
             self._update_mode()
-            self._print(f"▶  Game resumed → mode={self.mode}")
+            self._print(f"▶  Resumed → mode={self.mode}")
 
     # ─── Mode Management ──────────────────────────────────────────
     def _update_mode(self):
@@ -437,115 +427,127 @@ class BoardTrackerRPi:
             pass
         self.tracker_active = False
         self._update_mode()
-        self._print(f"   → LOCKED. Waiting for board_state/turn_signal...")
+        self._print(f"   → LOCKED. Waiting for engine response...")
 
     def _publish_promo(self, from_to):
         payload = json.dumps({'move': from_to})
-        self._print(f"\n♟  PUBLISH /chess/promotion_request: {payload}")
+        self._print(f"\n♟  PUBLISH promotion_request: {payload}")
         self._pub(self.pub_promo, payload)
         self.pending_promotion_from_to = from_to
         self._update_mode()
 
-    # ─── Scan Loop ────────────────────────────────────────────────
-    def scan_loop(self):
-        period = 1.0 / self.SCAN_RATE_HZ
-        last_occ = self.sensor.scan()
-        stable = 0
+    # ─── Button Listener (keyboard ENTER = push button) ──────────
+    def _button_listener(self):
+        """
+        Thread يستمع لـ ENTER من الكيبورد.
+        في الواقع رح يكون Push Button على GPIO — هون محاكاة.
+        """
+        while not self._shutdown.is_set():
+            if ROS_AVAILABLE and rospy.is_shutdown():
+                break
+            # ننتظر ENTER (non-blocking مع timeout)
+            if select.select([sys.stdin], [], [], 0.2)[0]:
+                line = sys.stdin.readline().strip()
+                # أي كبسة ENTER (فاضية أو مع نص) تعتبر "خلصت حركتي"
+                self._button_pressed.set()
 
+    # ─── Main Logic Loop ──────────────────────────────────────────
+    def _main_loop(self):
+        """
+        الحلقة الرئيسية: تنتظر الـ button press ثم تقرأ وتحلل.
+        """
         while not self._shutdown.is_set():
             if ROS_AVAILABLE and rospy.is_shutdown():
                 break
 
-            current = self.sensor.scan()
-            if current == last_occ:
-                stable += 1
-            else:
-                stable = 0
-                last_occ = current
+            # لو مش ACTIVE — ننتظر بدون ما نعمل شي
+            if self.mode != Mode.ACTIVE:
+                time.sleep(0.1)
+                continue
 
-            if stable == self.STABILITY_CYCLES:
-                # ── طباعة المصفوفة عند التغيير ──
-                now = time.time()
-                if current != self._last_printed_occ and (now - self._last_print_time) > self.PRINT_INTERVAL_S:
-                    self._last_printed_occ = [row[:] for row in current]
-                    self._last_print_time = now
-                    print_matrix(current, f"SENSOR SCAN [mode={self.mode}]")
-                    # أظهر الفرق مع الـ anchor
-                    if self.mode == Mode.ACTIVE:
-                        disappeared, appeared = diff_occupancy(self._anchor_occ, current)
-                        if disappeared or appeared:
-                            print(f"   ↑ disappeared={disappeared}  appeared={appeared}")
-                            sys.stdout.flush()
+            # ── انتظر كبسة الزر ──
+            self._button_pressed.clear()
+            got_press = self._button_pressed.wait(timeout=0.3)
 
-                self._dispatch(current)
+            if not got_press:
+                continue  # ما حدا كبس — نرجع نفحص mode
 
-            # Locked timeout
+            # ── كُبس الزر! نقرأ السينسورز ──
+            if self.mode != Mode.ACTIVE:
+                self._print("⚠️  Button pressed but not your turn anymore.")
+                continue
+
+            self._print(f"\n🔘 BUTTON PRESSED! Reading sensors...")
+
+            # قراءة مستقرة (3 قراءات متتالية متطابقة)
+            current_occ = self._stable_read()
+            if current_occ is None:
+                self._print("❌ Could not get stable reading. Try again.")
+                continue
+
+            # ── عرض المصفوفة الحالية ──
+            print_matrix(current_occ, "CURRENT BOARD (after your move)")
+            print_matrix(self._anchor_occ, "ANCHOR (before your move)")
+
+            # ── الفرق ──
+            disappeared, appeared = diff_occupancy(self._anchor_occ, current_occ)
+            self._print(f"   disappeared = {disappeared}")
+            self._print(f"   appeared    = {appeared}")
+
+            if not disappeared and not appeared:
+                self._print("⚠️  No change detected! Did you move a piece?")
+                self._print("   Press [ENTER] again after moving.")
+                continue
+
+            # ── تصنيف الحركة ──
+            result = MoveDetector.classify(self.chess_board, current_occ, self._anchor_occ)
+            kind = result['kind']
+            self._print(f"   classification: {kind}")
+
+            if kind == 'complete':
+                self._print(f"   ✅ Detected move: {result['uci']}")
+                self._publish_move(result['uci'])
+
+            elif kind == 'promotion':
+                self._print(f"   ♟  Promotion detected: {result['from_to']}")
+                self._publish_promo(result['from_to'])
+
+            elif kind == 'pending':
+                self._print(f"   ⏳ Incomplete move — you might still be moving.")
+                self._print(f"      Finish your move and press [ENTER] again.")
+
+            elif kind == 'anomaly':
+                self._print(f"   ❌ INVALID MOVE! reason={result.get('reason')}")
+                self._print(f"      disappeared={result.get('disappeared')}")
+                self._print(f"      appeared={result.get('appeared')}")
+                self._print(f"      Please fix the board and press [ENTER] again.")
+
+            # Locked timeout check
             if self.mode == Mode.LOCKED and self.locked_uci:
                 if time.time() - self.locked_time > self.LOCKED_TIMEOUT_S:
-                    self._print(f"⏰ LOCKED timeout for {self.locked_uci} — unlocking.")
+                    self._print(f"⏰ LOCKED timeout — unlocking.")
                     self.locked_uci = None
                     self._update_mode()
 
-            time.sleep(period)
-
-    def _dispatch(self, occ):
-        if self.mode == Mode.WAITING:
-            return
-        if self.mode == Mode.LOCKED:
-            return
-        if self.mode == Mode.MONITOR:
-            self._check_mismatch(occ)
-            return
-        if self.mode == Mode.ACTIVE:
-            self._classify(occ)
-
-    def _classify(self, occ):
-        if self.pending_promotion_from_to:
-            return
-        result = MoveDetector.classify(self.chess_board, occ, self._anchor_occ)
-        kind = result['kind']
-
-        if kind == 'clean':
-            self.pending_since = None
-            return
-        if kind == 'complete':
-            self._publish_move(result['uci'])
-            self.pending_since = None
-            return
-        if kind == 'promotion':
-            self._publish_promo(result['from_to'])
-            return
-        if kind == 'pending':
-            if self.pending_since is None:
-                self.pending_since = time.time()
-                self._print(f"⏳ PENDING: {result.get('disappeared', [])}")
-            return
-        if kind == 'anomaly':
-            r = (tuple(result.get('disappeared', [])), tuple(result.get('appeared', [])))
-            if r != self.last_anomaly_repr:
-                self.last_anomaly_repr = r
-                self._print(f"⚠️  ANOMALY: disappeared={result.get('disappeared')} appeared={result.get('appeared')} reason={result.get('reason')}")
-
-    def _check_mismatch(self, occ):
-        expected = occupancy_from_chess(self.chess_board)
-        if occ == expected:
-            self.last_mismatch_repr = None
-            return
-        if time.time() - self.last_board_state_time < self.MISMATCH_GRACE_S:
-            return
-        d, a = diff_occupancy(expected, occ)
-        r = (tuple(d), tuple(a))
-        if r != self.last_mismatch_repr:
-            self.last_mismatch_repr = r
-            self._print(f"⚠️  MISMATCH: missing={d} extra={a}")
+    def _stable_read(self, attempts=5, delay=0.05):
+        """قراءة مستقرة: يقرأ عدة مرات ويأكد إنها متطابقة"""
+        last = self.sensor.scan()
+        stable_count = 0
+        for _ in range(attempts * 3):
+            time.sleep(delay)
+            current = self.sensor.scan()
+            if current == last:
+                stable_count += 1
+                if stable_count >= attempts - 1:
+                    return current
+            else:
+                stable_count = 0
+                last = current
+        return last  # أرجع آخر قراءة حتى لو مش 100% مستقرة
 
     # ─── Initial Verification ─────────────────────────────────────
     def verify_initial(self):
-        """
-        تحقق من القطع — مع timeout 30 ثانية.
-        لو ما اكتملت → يطبع تحذير ويكمّل (ما يحجز النود).
-        """
-        self._print("🔍 Checking initial board state (30s timeout)...")
+        self._print("🔍 Checking initial board (30s timeout)...")
         expected = occupancy_from_chess(chess.Board())
         deadline = time.time() + 30.0
 
@@ -558,33 +560,48 @@ class BoardTrackerRPi:
                 print_matrix(current, "INITIAL BOARD")
                 return True
             if time.time() > deadline:
-                # ── Timeout — اطبع الحالة وكمّل ──
-                self._print("⚠️  TIMEOUT: Board not fully set up. Continuing anyway...")
-                print_matrix(current, "CURRENT (incomplete)")
-                print_matrix(expected, "EXPECTED (32 pieces)")
-                return True  # نكمّل بدل ما نحجز
+                self._print("⚠️  TIMEOUT: Continuing without full board.")
+                pieces = sum(sum(row) for row in current)
+                self._print(f"   Detected {pieces}/32 pieces")
+                print_matrix(current, f"CURRENT ({pieces} pieces)")
+                return True
             time.sleep(0.5)
         return False
 
     # ─── Main Entry Point ─────────────────────────────────────────
     def run(self):
-        self._print("╔══════════════════════════════════════════════╗")
-        self._print("║   Board Tracker RPi v2 — Starting...        ║")
-        self._print("╚══════════════════════════════════════════════╝")
-        self._print(f"ROS_AVAILABLE={ROS_AVAILABLE}")
-        self._print(f"HAS_GPIO={HAS_GPIO}")
+        self._print("╔══════════════════════════════════════════════════════╗")
+        self._print("║   Board Tracker v2 — BUTTON MODE (Press ENTER)      ║")
+        self._print("╚══════════════════════════════════════════════════════╝")
+        self._print(f"ROS={ROS_AVAILABLE} | GPIO={HAS_GPIO}")
+        self._print("")
 
         if not self.verify_initial():
             return
 
-        self._print(f"\n🚀 Scan loop running.")
-        self._print(f"📡 Subscribed to: /chess/game_start, /chess/board_state,")
-        self._print(f"   /chess/turn_signal, /chess/game_stop, /chess/pause")
-        self._print(f"📢 Publishing to: /chess/move, /chess/promotion_request")
+        self._print(f"\n📡 Subscribed: game_start, board_state, turn_signal, game_stop, pause")
+        self._print(f"📢 Publishing: /chess/move, /chess/promotion_request")
+        self._print(f"")
+        self._print(f"┌─────────────────────────────────────────────────┐")
+        self._print(f"│  HOW TO USE:                                    │")
+        self._print(f"│  1. Wait for 'YOUR TURN' message                │")
+        self._print(f"│  2. Move your piece on the physical board       │")
+        self._print(f"│  3. Press [ENTER] to confirm your move          │")
+        self._print(f"│                                                 │")
+        self._print(f"│  The system will read sensors and detect        │")
+        self._print(f"│  your move automatically.                       │")
+        self._print(f"└─────────────────────────────────────────────────┘")
+        self._print(f"")
         self._print(f"⏳ Waiting for /chess/game_start...\n")
 
-        t = threading.Thread(target=self.scan_loop, daemon=True)
-        t.start()
+        # شغّل thread لقراءة الكيبورد (محاكاة Push Button)
+        btn_thread = threading.Thread(target=self._button_listener, daemon=True)
+        btn_thread.start()
+
+        # شغّل thread المنطق الرئيسي
+        logic_thread = threading.Thread(target=self._main_loop, daemon=True)
+        logic_thread.start()
+
         try:
             if ROS_AVAILABLE:
                 rospy.spin()
@@ -595,7 +612,8 @@ class BoardTrackerRPi:
             pass
         finally:
             self._shutdown.set()
-            t.join(timeout=2)
+            btn_thread.join(timeout=2)
+            logic_thread.join(timeout=2)
             self.sensor.cleanup()
             self._print("🔌 Shutdown complete.")
 

@@ -231,7 +231,7 @@ class Mode:
 class BoardTrackerRPi:
     SCAN_RATE_HZ = 20
     STABILITY_CYCLES = 3
-    LOCKED_TIMEOUT_S = 30.0
+    LOCKED_TIMEOUT_S = 10.0      # تقليل: لو board_state ما وصل خلال 10 ثوان → unlock
     LIFT_TIMEOUT_S = 30.0
     MISMATCH_GRACE_S = 3.0
 
@@ -319,6 +319,7 @@ class BoardTrackerRPi:
         """
         استقبال حالة اللوحة من chess_engine.
         يُستخدم لتزامن الـ chess_board و anchor_occ بعد حركة الروبوت.
+        هذا التحديث يفك الـ LOCKED state أيضاً.
         """
         try:
             p = json.loads(msg.data)
@@ -332,8 +333,10 @@ class BoardTrackerRPi:
                 self.chess_board = chess.Board(fen)
                 self._anchor_occ = occupancy_from_chess(self.chess_board)
                 self.last_board_state_time = time.time()
+                # ── فك الـ LOCKED — board_state يعني chess_engine عالج الحركة ──
                 self.locked_uci = None
                 self.pending_promotion_from_to = None
+                self.pending_since = None
                 self._log(f"board_state synced via FEN: {fen.split()[0][:20]}...")
             except Exception as e:
                 self._warn(f"FEN parse error: {e}")
@@ -357,7 +360,7 @@ class BoardTrackerRPi:
 
         self.tracker_active = p.get('active', False)
 
-        # تزامن إضافي لو في fen
+        # تزامن إضافي لو في fen — يضمن الـ anchor محدّث قبل ما نبدأ نتتبع
         fen = p.get('fen')
         if fen:
             try:
@@ -365,8 +368,15 @@ class BoardTrackerRPi:
                 if new_board.fen() != self.chess_board.fen():
                     self.chess_board = new_board
                     self._anchor_occ = occupancy_from_chess(self.chess_board)
+                    self._log(f"turn_signal: anchor updated from FEN")
             except Exception:
                 pass
+
+        # لو active=True — تأكد إنّ الـ LOCKED محرّر
+        if self.tracker_active:
+            self.locked_uci = None
+            self.pending_promotion_from_to = None
+            self.pending_since = None
 
         self._update_mode()
         self._log(f"turn_signal: active={self.tracker_active} mode={self.mode}")

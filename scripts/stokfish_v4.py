@@ -401,34 +401,32 @@ while not rospy.is_shutdown():
         # ────────────────────────────────────────────────────────
         if is_human_turn:
             print(f"👉 Your move ({user_color.upper()}): waiting for /chess/move...")
-            # انتظر الحركة من display_node أو board_tracker
-            gui_move_ready.clear()
 
-            while not reset_game and not rospy.is_shutdown():
-                # Check terminal input (للتطوير/debugging)
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    mv = sys.stdin.readline().strip().lower()
-                    if not uci_format_ok(mv):
-                        pub_gui_status.publish("Invalid format! Use e2e4")
-                        print(">>> Invalid format!")
-                        continue
-                    final_gui_move_local = mv
-                    break
-
-                # Check ROS move (from display or board_tracker)
-                if gui_move_ready.is_set():
-                    final_gui_move_local = final_gui_move.strip().lower()
+            # ── انتظار الحركة (من board_tracker أو terminal) ──
+            mv = None
+            while mv is None and not reset_game and not rospy.is_shutdown():
+                # 1) Check ROS move (from board_tracker or display)
+                if gui_move_ready.wait(timeout=0.15):
+                    mv = final_gui_move.strip().lower()
                     gui_move_ready.clear()
                     break
-            else:
+
+                # 2) Check terminal input (debugging only)
+                if select.select([sys.stdin], [], [], 0.0)[0]:
+                    line_in = sys.stdin.readline().strip().lower()
+                    if uci_format_ok(line_in):
+                        mv = line_in
+                        break
+                    else:
+                        pub_gui_status.publish("Invalid format! Use e2e4")
+                        print(">>> Invalid format!")
+
+            if reset_game or rospy.is_shutdown():
                 break
+            if mv is None:
+                continue
 
-            if reset_game:
-                break
-
-            mv = final_gui_move_local
-
-            # Validate the move
+            # ── Validate the move ──
             try:
                 temp_board = chess.Board(current_fen)
                 from_sq = chess.parse_square(mv[0:2])
@@ -444,15 +442,20 @@ while not rospy.is_shutdown():
                 if chess.Move.from_uci(check_mv) not in temp_board.legal_moves:
                     pub_gui_status.publish(f"Illegal move: {mv}")
                     print(f">>> ILLEGAL MOVE: {mv}")
-                    continue
+                    continue  # يرجع لأول الـ game loop → يدخل human turn تاني
 
                 if is_promo_potential:
                     # اطلب من الـ GUI يعرض نافذة الترقية
                     print("♟  Opening Promotion Dialog on GUI...")
                     pub_gui_status.publish(f"__PROMOTION__:{mv}")
                     gui_move_ready.clear()
-                    gui_move_ready.wait()
+                    # انتظر رد الـ GUI بحرف الترقية
+                    while not gui_move_ready.is_set() and not reset_game:
+                        time.sleep(0.1)
+                    if reset_game:
+                        break
                     mv = final_gui_move.strip().lower()
+                    gui_move_ready.clear()
 
                 move_obj = chess.Move.from_uci(mv)
                 move_to_send = mv

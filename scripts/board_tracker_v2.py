@@ -55,20 +55,14 @@ RANKS = '12345678'
 
 
 def rc_to_sq(row, col):
-    # ── عكس الأعمدة: العمود 0 الفيزيائي = h، العمود 7 = a ──
-    mirrored_col = 7 - col
-    return FILES[mirrored_col] + str(8 - row)
+    return FILES[col] + str(8 - row)
 
 
 def occupancy_from_chess(board):
-    # ── عكس الأعمدة: file 0 (a) في chess = العمود 7 في السينسورز ──
     occ = [[0] * 8 for _ in range(8)]
     for r in range(8):
         for c in range(8):
-            # c في المصفوفة الفيزيائية = (7-c) في chess
-            chess_file = 7 - c
-            chess_rank = 7 - r
-            sq = chess.square(chess_file, chess_rank)
+            sq = chess.square(c, 7 - r)
             if board.piece_at(sq) is not None:
                 occ[r][c] = 1
     return occ
@@ -404,11 +398,13 @@ class BoardTrackerRPi:
 
         # لو صار ACTIVE — نقرأ السينسورز ونحدّث الـ anchor من الواقع
         if self.mode == Mode.ACTIVE:
+            # ── ننتظر ثانية عشان الروبوت يخلّص حركته فيزيائياً ──
+            time.sleep(1.0)
             # ── قراءة فيزيائية حقيقية = الـ anchor الصحيح ──
             real_occ = self._stable_read()
             if real_occ is not None:
                 self._anchor_occ = real_occ
-                self._print(f"   📷 Anchor updated from PHYSICAL sensors (not FEN)")
+                self._print(f"   📷 Anchor updated from PHYSICAL sensors")
                 print_matrix(self._anchor_occ, "ANCHOR (from sensors)")
             self._print(f"\n{'─'*50}")
             self._print(f"👉 YOUR TURN! Move your piece then press [ENTER]")

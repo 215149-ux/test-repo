@@ -329,6 +329,13 @@ class BoardTrackerRPi:
         except Exception:
             return
 
+        # ── لو وصل board_state بس game_start ما وصل — فعّل اللعبة ──
+        if not self.game_active:
+            self._print(f"   ⚡ Auto-activating game from board_state")
+            self.game_active = True
+            if self.game_mode is None:
+                self.game_mode = 'HvR'
+
         fen = p.get('fen')
         if fen:
             try:
@@ -353,6 +360,18 @@ class BoardTrackerRPi:
             return
 
         self.tracker_active = p.get('active', False)
+
+        # ── لو وصل turn_signal بس game_start ما وصل — فعّل اللعبة تلقائياً ──
+        if not self.game_active and self.tracker_active:
+            self._print(f"   ⚡ Auto-activating game (game_start missed)")
+            self.game_active = True
+            self.game_mode = 'HvR'
+            mode_str = p.get('mode', 'Human vs Robot')
+            if 'Robot' in mode_str and 'Robot' in mode_str.split('vs')[-1]:
+                self.game_mode = 'RvR'
+            h_color = p.get('human_color', 'white')
+            if h_color and h_color != 'none':
+                self.human_color = chess.WHITE if h_color == 'white' else chess.BLACK
 
         fen = p.get('fen')
         if fen:

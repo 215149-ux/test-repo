@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+stokfish_v4.py — Promotion Test Setup
+يبدأ بوضعية فيها بيدق أبيض a7 وبيدق أسود h2 — جاهزين للترقية.
+FEN: 4k3/P7/8/8/8/8/7p/4K3 w - - 0 1
+"""
 import subprocess
 import chess
 import sys
@@ -255,10 +260,13 @@ while not rospy.is_shutdown():
     
     reset_game = False
     moves_list = []
-    proc.stdin.write("position startpos\n"); proc.stdin.flush()
+    
+    # ── وضعية اختبار البروموشن: بيدق أبيض a7 + بيدق أسود h2 ──
+    PROMO_FEN = "4k3/P7/8/8/8/8/7p/4K3 w - - 0 1"
+    proc.stdin.write(f"position fen {PROMO_FEN}\n"); proc.stdin.flush()
     current_fen = get_board()
     publish_to_gui(current_fen)
-    pub_gui_status.publish("White's turn") 
+    pub_gui_status.publish("White's turn — PROMOTION TEST") 
 
     game_mode = '2' if mode == "Robot vs Robot" else '1'
     user_color = game_settings.get('color', 'White').lower()
@@ -341,7 +349,7 @@ while not rospy.is_shutdown():
                     if reset_game: break
 
             if reset_game: break
-            proc.stdin.write(f"position startpos moves {' '.join(moves_list)}\n"); proc.stdin.flush()
+            proc.stdin.write(f"position fen {PROMO_FEN} moves {' '.join(moves_list)}\n"); proc.stdin.flush()
             current_fen = get_board(); publish_to_gui(current_fen, last_move=moves_list[-1])
 
         elif game_mode == '2':
@@ -380,7 +388,7 @@ while not rospy.is_shutdown():
             
             if len(best) == 5: print(f"✨ [PROMOTION] {robot_name} promoted to {best[4]}!")
             moves_list.append(best)
-            proc.stdin.write(f"position startpos moves {' '.join(moves_list)}\n"); proc.stdin.flush()
+            proc.stdin.write(f"position fen {PROMO_FEN} moves {' '.join(moves_list)}\n"); proc.stdin.flush()
             current_fen = get_board()
             print(f"{robot_name} plays: {best}")
             
@@ -421,7 +429,7 @@ while not rospy.is_shutdown():
 
                 if len(best) == 5: print(f"✨ [PROMOTION] Panda 1 promoted to {best[4]}!")
                 moves_list.append(best)
-                proc.stdin.write(f"position startpos moves {' '.join(moves_list)}\n"); proc.stdin.flush()
+                proc.stdin.write(f"position fen {PROMO_FEN} moves {' '.join(moves_list)}\n"); proc.stdin.flush()
                 current_fen = get_board()
                 print(f"Panda 1 plays: {best}")
                 

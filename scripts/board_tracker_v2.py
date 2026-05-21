@@ -402,8 +402,14 @@ class BoardTrackerRPi:
         self._update_mode()
         self._print(f"   → active={self.tracker_active} mode={self.mode}")
 
-        # لو صار ACTIVE — نبّه المستخدم يحرّك ويكبس
+        # لو صار ACTIVE — نقرأ السينسورز ونحدّث الـ anchor من الواقع
         if self.mode == Mode.ACTIVE:
+            # ── قراءة فيزيائية حقيقية = الـ anchor الصحيح ──
+            real_occ = self._stable_read()
+            if real_occ is not None:
+                self._anchor_occ = real_occ
+                self._print(f"   📷 Anchor updated from PHYSICAL sensors (not FEN)")
+                print_matrix(self._anchor_occ, "ANCHOR (from sensors)")
             self._print(f"\n{'─'*50}")
             self._print(f"👉 YOUR TURN! Move your piece then press [ENTER]")
             self._print(f"{'─'*50}")

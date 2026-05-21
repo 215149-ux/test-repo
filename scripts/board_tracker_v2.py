@@ -55,14 +55,20 @@ RANKS = '12345678'
 
 
 def rc_to_sq(row, col):
-    return FILES[col] + str(8 - row)
+    # ── عكس الأعمدة: العمود 0 الفيزيائي = h، العمود 7 = a ──
+    mirrored_col = 7 - col
+    return FILES[mirrored_col] + str(8 - row)
 
 
 def occupancy_from_chess(board):
+    # ── عكس الأعمدة: file 0 (a) في chess = العمود 7 في السينسورز ──
     occ = [[0] * 8 for _ in range(8)]
     for r in range(8):
         for c in range(8):
-            sq = chess.square(c, 7 - r)
+            # c في المصفوفة الفيزيائية = (7-c) في chess
+            chess_file = 7 - c
+            chess_rank = 7 - r
+            sq = chess.square(chess_file, chess_rank)
             if board.piece_at(sq) is not None:
                 occ[r][c] = 1
     return occ
@@ -265,6 +271,8 @@ class BoardTrackerRPi:
             # Publishers
             self.pub_move = rospy.Publisher('/chess/move', String, queue_size=10)
             self.pub_promo = rospy.Publisher('/chess/promotion_request', String, queue_size=10)
+            self.pub_status = rospy.Publisher('/chess/status', String, queue_size=10)
+            self.pub_pause = rospy.Publisher('/chess/pause', String, queue_size=10)
 
             # Subscribers
             rospy.Subscriber('/chess/game_start', String, self._on_game_start, queue_size=5)
@@ -275,6 +283,8 @@ class BoardTrackerRPi:
         else:
             self.pub_move = None
             self.pub_promo = None
+            self.pub_status = None
+            self.pub_pause = None
 
     # ─── Helpers ───────────────────────────────────────────────────
     def _pub(self, pub, msg):
@@ -479,6 +489,23 @@ class BoardTrackerRPi:
             if ROS_AVAILABLE and rospy.is_shutdown():
                 break
 
+            # ── لو متوقف بسبب خطأ — ENTER يعمل resume ──
+            if self.paused and self.game_active:
+                self._button_pressed.clear()
+                got_press = self._button_pressed.wait(timeout=0.3)
+                if got_press:
+                    self._print(f"\n▶  Resuming after error fix...")
+                    self._pub(self.pub_pause, "resume")
+                    self.paused = False
+                    self.tracker_active = True
+                    self._update_mode()
+                    self._print(f"   → mode={self.mode}")
+                    if self.mode == Mode.ACTIVE:
+                        self._print(f"\n{'─'*50}")
+                        self._print(f"👉 YOUR TURN! Move your piece then press [ENTER]")
+                        self._print(f"{'─'*50}")
+                continue
+
             # لو مش ACTIVE — ننتظر بدون ما نعمل شي
             if self.mode != Mode.ACTIVE:
                 time.sleep(0.1)
@@ -536,10 +563,15 @@ class BoardTrackerRPi:
                 self._print(f"      Finish your move and press [ENTER] again.")
 
             elif kind == 'anomaly':
-                self._print(f"   ❌ INVALID MOVE! reason={result.get('reason')}")
+                self._print(f"   ❌ ERROR DETECTED! reason={result.get('reason')}")
                 self._print(f"      disappeared={result.get('disappeared')}")
                 self._print(f"      appeared={result.get('appeared')}")
-                self._print(f"      Please fix the board and press [ENTER] again.")
+                self._print(f"      ⏸  PAUSING GAME — fix the board then press [ENTER]")
+                # ── ابعث pause مع السبب للـ display ──
+                self._pub(self.pub_status, "⚠️ Board error detected — game paused. Fix pieces and resume.")
+                self._pub(self.pub_pause, "pause")
+                self.paused = True
+                self._update_mode()
 
             # Locked timeout check
             if self.mode == Mode.LOCKED and self.locked_uci:

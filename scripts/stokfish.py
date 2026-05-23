@@ -43,7 +43,7 @@ def cb_game_start(msg):
 
 def cb_gui_move(msg):
     global final_gui_move
-    final_gui_move = msg.data
+    final_gui_move = msg.data.strip()
     gui_move_ready.set()
 
 def cb_game_stop(msg):
@@ -250,49 +250,61 @@ while not rospy.is_shutdown():
 
         if is_human_turn:
             print(f"👉 Your move ({user_color.upper()}): ")
+            gui_move_ready.clear()
             while not reset_game and not rospy.is_shutdown():
-                if select.select([sys.stdin], [], [], 0.1)[0]:
+                # نقبل الحركة من مصدرين: stdin أو /chess/move (من board_tracker)
+                mv = None
+                if select.select([sys.stdin], [], [], 0.05)[0]:
                     mv = sys.stdin.readline().strip().lower()
-                    if not uci_format_ok(mv):
-                        pub_gui_status.publish("Invalid format! Use e2e4")
-                        print(">>> Invalid format!"); continue
-                    try:
-                        temp_board = chess.Board(current_fen)
-                        from_sq = chess.parse_square(mv[0:2])
-                        piece = temp_board.piece_at(from_sq)
-                        to_rank = chess.square_rank(chess.parse_square(mv[2:4]))
-                        is_promo_potential = (piece and piece.piece_type == chess.PAWN and to_rank in (0,7) and len(mv) == 4)
-                        check_mv = mv + 'q' if is_promo_potential else mv
+                elif gui_move_ready.is_set():
+                    mv = final_gui_move.strip().lower()
+                    gui_move_ready.clear()
+                    print(f"📡 Received move from /chess/move: {mv}")
+
+                if mv is None:
+                    if reset_game: break
+                    continue
+
+                if not uci_format_ok(mv):
+                    pub_gui_status.publish("Invalid format! Use e2e4")
+                    print(">>> Invalid format!"); continue
+                try:
+                    temp_board = chess.Board(current_fen)
+                    from_sq = chess.parse_square(mv[0:2])
+                    piece = temp_board.piece_at(from_sq)
+                    to_rank = chess.square_rank(chess.parse_square(mv[2:4]))
+                    is_promo_potential = (piece and piece.piece_type == chess.PAWN and to_rank in (0,7) and len(mv) == 4)
+                    check_mv = mv + 'q' if is_promo_potential else mv
+                    
+                    if chess.Move.from_uci(check_mv) in temp_board.legal_moves:
+                        if is_promo_potential:
+                            print("♟  Opening Promotion Dialog on GUI...")
+                            pub_gui_status.publish(f"__PROMOTION__:{mv}")
+                            gui_move_ready.clear(); gui_move_ready.wait()
+                            mv = final_gui_move
                         
-                        if chess.Move.from_uci(check_mv) in temp_board.legal_moves:
-                            if is_promo_potential:
-                                print("♟  Opening Promotion Dialog on GUI...")
-                                pub_gui_status.publish(f"__PROMOTION__:{mv}")
-                                gui_move_ready.clear(); gui_move_ready.wait()
-                                mv = final_gui_move
-                            
-                            move_obj = chess.Move.from_uci(mv)
-                            move_to_send = mv
-                            if temp_board.is_castling(move_obj):
-                                castling_data = {"king_move": mv, "rook_move": "", "castling_flag": 1}
-                                if mv == "e1g1": castling_data["rook_move"] = "h1f1"
-                                elif mv == "e1c1": castling_data["rook_move"] = "a1d1"
-                                elif mv == "e8g8": castling_data["rook_move"] = "h8f8"
-                                elif mv == "e8c8": castling_data["rook_move"] = "a8d8"
-                                move_to_send = json.dumps(castling_data)
-                                print(f"🏰 [HUMAN CASTLING]: {move_to_send}")
-                            elif temp_board.is_capture(move_obj):
-                                print(f"\n🔥 [CAPTURE] You took a piece at {mv[2:4]}!")
-                            
-                            moves_list.append(mv)
-                            if not reset_game:
-                                next_color = "Black" if board_obj.turn == chess.WHITE else "White"
-                                pub_gui_status.publish(f"{next_color}'s turn") 
-                            break 
-                        else:
-                            pub_gui_status.publish(f"Illegal move: {mv}")
-                            print(">>> ILLEGAL MOVE!")
-                    except: print(">>> Error in move detection.")
+                        move_obj = chess.Move.from_uci(mv)
+                        move_to_send = mv
+                        if temp_board.is_castling(move_obj):
+                            castling_data = {"king_move": mv, "rook_move": "", "castling_flag": 1}
+                            if mv == "e1g1": castling_data["rook_move"] = "h1f1"
+                            elif mv == "e1c1": castling_data["rook_move"] = "a1d1"
+                            elif mv == "e8g8": castling_data["rook_move"] = "h8f8"
+                            elif mv == "e8c8": castling_data["rook_move"] = "a8d8"
+                            move_to_send = json.dumps(castling_data)
+                            print(f"🏰 [HUMAN CASTLING]: {move_to_send}")
+                        elif temp_board.is_capture(move_obj):
+                            print(f"\n🔥 [CAPTURE] You took a piece at {mv[2:4]}!")
+                        
+                        moves_list.append(mv)
+                        if not reset_game:
+                            next_color = "Black" if board_obj.turn == chess.WHITE else "White"
+                            pub_gui_status.publish(f"{next_color}'s turn") 
+                        break 
+                    else:
+                        pub_gui_status.publish(f"Illegal move: {mv}")
+                        print(">>> ILLEGAL MOVE!")
+                except: print(">>> Error in move detection.")
                 if reset_game: break
 
             if reset_game: break

@@ -413,12 +413,18 @@ class BoardTrackerNode:
             self._warn(f"board_state: invalid FEN {fen!r} ({e})")
             return
 
+        # حفظ المود الحالي قبل التحديث — نحتاجه لتحديد هل نزامن الحساس
+        mode_before_sync = self.mode
+
         self.chess_board = new_board
         self._anchor_occ = occupancy_from_chess(new_board)
-        # In simulation: sync sensor with board_state to reflect robot arm moves.
-        # On real hardware: sensor already reflects physical changes (no-op).
+        # نزامن الحساس المحاكي فقط عندما تكون حركة الروبوت (MONITOR/LOCKED).
+        # لا نزامن أبداً في ACTIVE — لأن الحساس يجب أن يعكس الواقع الفيزيائي
+        # (اللاعب قد يكون بدأ يحرّك قبل وصول board_state).
+        # على الراسبيري الحقيقي: الحساس يعكس GPIO تلقائياً — لا حاجة للمزامنة.
         if isinstance(self.sensor, SimulatedSensorBoard):
-            self.sensor.load_from_chess_board(new_board)
+            if mode_before_sync != Mode.ACTIVE:
+                self.sensor.load_from_chess_board(new_board)
         self.last_board_state_time = time.time()
         self.locked_uci = None
         self.pending_promotion_from_to = None

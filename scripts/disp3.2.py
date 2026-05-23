@@ -723,12 +723,8 @@ class GameScreen(QWidget):
         self.board_widget.last_move     = None
         self.board_widget.king_in_check = None
 
-        if settings['mode'] == "Human vs Robot":
-            self.board_widget.flipped = (self.human_color == 'black')
-        else:
-            # RvR: Robot 2 في الأسفل — نفس منطق HvR بالضبط بس بلون Robot 2
-            r2_color = settings.get('robot2', {}).get('color', 'Black').strip().lower()
-            self.board_widget.flipped = (r2_color == 'black')
+        # اللوحة الفيزيائية ثابتة دائماً (a1 أسفل-يسار) — لا نقلب أبداً
+        self.board_widget.flipped = False
 
         self.board_widget.update()
  
@@ -766,12 +762,9 @@ class GameScreen(QWidget):
  
     def ros_update_board(self, board, last_move_uci, turn, human_color=None, king_in_check=None, robot2_color='none'):
         if human_color and human_color not in ('none', None):
-            # HvR: اقلب حسب لون الإنسان
             self.human_color = human_color
-            self.board_widget.flipped = (self.human_color == 'black')
-        elif human_color == 'none' and robot2_color != 'none':
-            # RvR: نفس منطق HvR — Robot 2 في الأسفل
-            self.board_widget.flipped = (robot2_color == 'black')
+        # اللوحة الفيزيائية ثابتة — لا نقلب أبداً
+        self.board_widget.flipped = False
 
         lm = None
         if last_move_uci and len(last_move_uci) >= 4:

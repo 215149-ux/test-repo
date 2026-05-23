@@ -79,6 +79,11 @@ def diff_occupancy(prev, curr):
     return disappeared, appeared
 
 
+def flip_occupancy_180(occ):
+    """Rotate 8x8 occupancy matrix 180 degrees (for flipped board)."""
+    return [row[::-1] for row in reversed(occ)]
+
+
 def board_2d_to_fen(board_2d, turn='white'):
     """Convert display 2D board representation to FEN."""
     rows = []
@@ -373,8 +378,15 @@ class BoardTrackerNode:
         # Whether human plays White or Black, the chess logic starts identically.
         # Pieces are swapped physically by the player, but sensor reads real positions.
         self.chess_board = chess.Board()
-        self.sensor.load_from_chess_board(self.chess_board)
-        self._anchor_occ = occupancy_from_chess(self.chess_board)
+        occ = occupancy_from_chess(self.chess_board)
+        if self.flipped:
+            # الحساس الفيزيائي مقلوب — نخزّن مقلوب
+            self.sensor.load_from_chess_board(self.chess_board)
+            with self.sensor._lock:
+                self.sensor._board = flip_occupancy_180(occ)
+        else:
+            self.sensor.load_from_chess_board(self.chess_board)
+        self._anchor_occ = occ
         self._move_log.clear()
         self.locked_uci = None
         self.pending_promotion_from_to = None
@@ -418,9 +430,14 @@ class BoardTrackerNode:
         self.chess_board = new_board
         self._anchor_occ = occupancy_from_chess(new_board)
         # نزامن الحساس دائماً — لأن board_state هو مصدر الحقيقة.
-        # على الراسبيري الحقيقي: الحساس يعكس GPIO — هذا no-op.
+        # لما flipped: الحساس الفيزيائي مقلوب 180° — نخزّن القيمة المقلوبة
+        # حتى لما _read_sensor() يعمل flip يرجعها للوضع الطبيعي.
         if isinstance(self.sensor, SimulatedSensorBoard):
-            self.sensor.load_from_chess_board(new_board)
+            occ = occupancy_from_chess(new_board)
+            if self.flipped:
+                occ = flip_occupancy_180(occ)
+            with self.sensor._lock:
+                self.sensor._board = occ
         # تسجيل الحركة من board_state (last_move)
         last_move = payload.get('last_move')
         if last_move and last_move not in self._move_log:
@@ -513,19 +530,26 @@ class BoardTrackerNode:
         self._update_mode()
 
 
+    def _read_sensor(self):
+        """Read sensor and apply 180° rotation if board is flipped (human=black)."""
+        raw = self.sensor.scan()
+        if self.flipped:
+            return flip_occupancy_180(raw)
+        return raw
+
     # ========================================================================
     # Scan loop
     # ========================================================================
     def scan_loop(self):
         period = 1.0 / self.SCAN_RATE_HZ
-        last_occ = self.sensor.scan()
+        last_occ = self._read_sensor()
         stable_count = 0
 
         while not self._shutdown.is_set():
             if ROS_AVAILABLE and rospy.is_shutdown():
                 break
 
-            current = self.sensor.scan()
+            current = self._read_sensor()
             if current == last_occ:
                 stable_count += 1
             else:

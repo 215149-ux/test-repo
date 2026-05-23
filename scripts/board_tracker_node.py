@@ -299,6 +299,7 @@ class BoardTrackerNode:
         self.mode = Mode.WAITING
         self.game_mode = None
         self.human_color = None
+        self.flipped = False  # True = اللاعب أسود (اللوحة مقلوبة من منظوره)
         self.last_board_state_time = 0.0
 
 
@@ -362,6 +363,7 @@ class BoardTrackerNode:
             self.game_mode = 'HvR'
             color = (payload.get('color') or 'white').strip().lower()
             self.human_color = chess.WHITE if color == 'white' else chess.BLACK
+            self.flipped = (color == 'black')
         else:
             self._warn(f"game_start: unknown mode {mode!r}")
             return
@@ -413,18 +415,16 @@ class BoardTrackerNode:
             self._warn(f"board_state: invalid FEN {fen!r} ({e})")
             return
 
-        # حفظ المود الحالي قبل التحديث — نحتاجه لتحديد هل نزامن الحساس
-        mode_before_sync = self.mode
-
         self.chess_board = new_board
         self._anchor_occ = occupancy_from_chess(new_board)
-        # نزامن الحساس المحاكي فقط عندما تكون حركة الروبوت (MONITOR/LOCKED).
-        # لا نزامن أبداً في ACTIVE — لأن الحساس يجب أن يعكس الواقع الفيزيائي
-        # (اللاعب قد يكون بدأ يحرّك قبل وصول board_state).
-        # على الراسبيري الحقيقي: الحساس يعكس GPIO تلقائياً — لا حاجة للمزامنة.
+        # نزامن الحساس دائماً — لأن board_state هو مصدر الحقيقة.
+        # على الراسبيري الحقيقي: الحساس يعكس GPIO — هذا no-op.
         if isinstance(self.sensor, SimulatedSensorBoard):
-            if mode_before_sync != Mode.ACTIVE:
-                self.sensor.load_from_chess_board(new_board)
+            self.sensor.load_from_chess_board(new_board)
+        # تسجيل الحركة من board_state (last_move)
+        last_move = payload.get('last_move')
+        if last_move and last_move not in self._move_log:
+            self._move_log.append(last_move)
         self.last_board_state_time = time.time()
         self.locked_uci = None
         self.pending_promotion_from_to = None
@@ -481,6 +481,7 @@ class BoardTrackerNode:
             'mode': self.mode,
             'game_mode': self.game_mode,
             'human_color': self._color_name(),
+            'flipped': self.flipped,
             'moves': list(self._move_log),
         }
         self.pub_occ.publish(json.dumps(payload))
